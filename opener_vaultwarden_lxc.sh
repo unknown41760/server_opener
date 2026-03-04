@@ -34,6 +34,7 @@ ufw default allow outgoing
 # If directly exposed:
 ufw allow 80/tcp
 ufw allow 443/tcp
+ufw allow 8000/tcp
 ufw allow 8081/tcp
 # Allow SSH only from Proxmox host (adjust IP)
 ufw allow from 192.168.77.0/24 to any port 2244
@@ -58,7 +59,7 @@ maxretry = 3
 
 [vaultwarden]
 enabled = true
-port = 80,443,8081
+port = 80,443,8000,8081
 filter = vaultwarden
 banaction = %(banaction_allports)s
 logpath = /var/log/vaultwarden.log
