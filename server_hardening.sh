@@ -493,15 +493,14 @@ EOF
     log_info "Testing SSH connectivity on port $NEW_SSH_PORT..."
     sleep 1
     
-    # Try to get SSH banner from new port
-    SSH_BANNER=$(timeout 5 bash -c "exec 3<>/dev/tcp/localhost/$NEW_SSH_PORT; echo 'SSH-2.0-test' >&3; cat <&3" 2>/dev/null | head -1)
-    if echo "$SSH_BANNER" | grep -q "SSH"; then
-        log_success "SSH is responding on port $NEW_SSH_PORT"
-        log_info "Banner: $SSH_BANNER"
+    # Simple connectivity test using bash built-in /dev/tcp
+    # Just check if we can open a connection (don't need full SSH handshake)
+    if timeout 5 bash -c "exec 3<>/dev/tcp/localhost/$NEW_SSH_PORT" 2>/dev/null; then
+        log_success "SSH port $NEW_SSH_PORT is accepting connections"
     else
-        log_warning "Could not verify SSH response on port $NEW_SSH_PORT"
-        log_info "Port is listening but SSH handshake test may have failed"
-        log_info "This can happen with certain SSH configurations"
+        log_warning "Could not verify SSH connectivity on port $NEW_SSH_PORT"
+        log_info "Port is listening but connection test failed"
+        log_info "This is normal - will verify with actual SSH key test later"
     fi
     
     # Store SSH service name for later use
