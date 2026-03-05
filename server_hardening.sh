@@ -358,7 +358,17 @@ EOF
     fi
     
     # Full stop/start cycle (more reliable than restart for port changes)
-    log_info "Stopping $SSH_SERVICE..."
+    # On Ubuntu, also need to handle ssh.socket which uses socket activation
+    log_info "Stopping $SSH_SERVICE and checking for socket activation..."
+    
+    # Check if ssh.socket exists (Ubuntu socket activation)
+    if systemctl list-units --type=socket | grep -q "ssh\.socket"; then
+        log_info "Found ssh.socket - stopping socket activation..."
+        systemctl stop ssh.socket 2>/dev/null || true
+        systemctl disable ssh.socket 2>/dev/null || true
+        log_info "ssh.socket stopped and disabled"
+    fi
+    
     if ! systemctl stop "$SSH_SERVICE" 2>&1 | tee -a "$LOG_FILE"; then
         log_error "Failed to stop $SSH_SERVICE service"
         systemctl status "$SSH_SERVICE" --no-pager -l | tail -20
