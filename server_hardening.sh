@@ -198,8 +198,8 @@ phase_user_creation() {
     echo "$NEW_USER:$NEW_PASSWORD" | chpasswd
     usermod -aG sudo "$NEW_USER"
     
-    # Force password change on first login
-    chage -d 0 "$NEW_USER"
+    # Note: Not forcing password change since we use key-based auth
+    # chage -d 0 "$NEW_USER"  # Disabled - would block SSH connections during testing
     
     log_success "User $NEW_USER created with sudo privileges"
     
