@@ -416,7 +416,7 @@ EOF
     BOTH_PORTS_OK=false
     
     while [ $PORT_CHECK_ATTEMPTS -lt $MAX_PORT_RETRIES ]; do
-        ((PORT_CHECK_ATTEMPTS++))
+        PORT_CHECK_ATTEMPTS=$((PORT_CHECK_ATTEMPTS + 1))
         log_info "Port check attempt $PORT_CHECK_ATTEMPTS/$MAX_PORT_RETRIES..."
         
         # Check if both ports are listening
