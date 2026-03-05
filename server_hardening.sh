@@ -67,7 +67,7 @@ print_header() {
 }
 
 print_phase() {
-    echo -e "\n${YELLOW}[Phase $1/7] $2${NC}"
+    echo -e "\n${YELLOW}[Phase $1/8] $2${NC}"
     log "Starting Phase $1: $2"
 }
 
@@ -229,11 +229,27 @@ phase_user_creation() {
 }
 
 # =============================================================================
-# PHASE 3: SSH HARDENING
+# SSH SERVICE DETECTION
+# =============================================================================
+
+get_ssh_service_name() {
+    # Detect correct SSH service name (ssh vs sshd)
+    if systemctl list-unit-files | grep -q "^ssh\.service"; then
+        echo "ssh"
+    elif systemctl list-unit-files | grep -q "^sshd\.service"; then
+        echo "sshd"
+    else
+        # Default fallback
+        echo "ssh"
+    fi
+}
+
+# =============================================================================
+# PHASE 3: SSH HARDENING (Dual Port Safe Mode)
 # =============================================================================
 
 phase_ssh_hardening() {
-    print_phase "3" "SSH Hardening"
+    print_phase "3" "SSH Hardening (Safe Mode - Dual Port)"
     
     # Backup original SSH config
     cp /etc/ssh/sshd_config "$BACKUP_DIR/sshd_config"
@@ -244,15 +260,23 @@ phase_ssh_hardening() {
     [ -z "$CURRENT_PORT" ] && CURRENT_PORT="22"
     
     log_info "Current SSH port: $CURRENT_PORT"
+    log_info "New port will be: $NEW_SSH_PORT"
+    log_info "Running in dual-port mode to prevent lockout"
     
-    # Create new SSH config
+    # Detect SSH service name
+    SSH_SERVICE=$(get_ssh_service_name)
+    log_info "Detected SSH service: $SSH_SERVICE"
+    
+    # Create new SSH config with BOTH ports (dual-port mode)
     cat > /etc/ssh/sshd_config << EOF
 # Server Hardening SSH Configuration
 # Generated: $(date)
+# DUAL-PORT MODE: Both ports active for safe transition
 
-# Port configuration
+# Port configuration - DUAL PORT MODE
+# Port $CURRENT_PORT kept temporarily for safe transition
+Port $CURRENT_PORT
 Port $NEW_SSH_PORT
-#Port $CURRENT_PORT  # Temporarily commented - dual port mode
 
 # Authentication
 PermitRootLogin no
@@ -291,7 +315,7 @@ HostKey /etc/ssh/ssh_host_rsa_key
 Subsystem sftp /usr/lib/openssh/sftp-server
 EOF
 
-    log_success "New SSH configuration written"
+    log_success "New SSH configuration written (dual-port mode)"
     
     # Test SSH config syntax
     if ! sshd -t; then
@@ -301,19 +325,43 @@ EOF
     fi
     log_success "SSH configuration syntax validated"
     
-    # Restart SSH service
-    log_info "Restarting SSH service..."
-    systemctl restart sshd || systemctl restart ssh
+    # Restart SSH service with detected name
+    log_info "Restarting SSH service ($SSH_SERVICE)..."
+    if ! systemctl restart "$SSH_SERVICE"; then
+        log_error "Failed to restart $SSH_SERVICE service"
+        rollback_ssh
+        exit 1
+    fi
     sleep 2
     
     # Verify SSH service is running
-    if ! systemctl is-active --quiet sshd && ! systemctl is-active --quiet ssh; then
-        log_error "SSH service failed to restart"
+    if ! systemctl is-active --quiet "$SSH_SERVICE"; then
+        log_error "SSH service ($SSH_SERVICE) failed to restart"
         rollback_ssh
         exit 1
     fi
     
     log_success "SSH service restarted successfully"
+    
+    # Verify both ports are listening
+    log_info "Verifying ports are listening..."
+    sleep 2
+    
+    if ! ss -tlnp | grep -q ":$CURRENT_PORT"; then
+        log_warning "Port $CURRENT_PORT may not be listening"
+    else
+        log_success "Port $CURRENT_PORT is listening"
+    fi
+    
+    if ss -tlnp | grep -q ":$NEW_SSH_PORT"; then
+        log_success "Port $NEW_SSH_PORT is listening"
+    else
+        log_warning "Port $NEW_SSH_PORT may not be listening yet"
+    fi
+    
+    # Store SSH service name for later use
+    echo "$SSH_SERVICE" > "$BACKUP_DIR/ssh_service_name"
+    echo "$CURRENT_PORT" > "$BACKUP_DIR/original_ssh_port"
 }
 
 # =============================================================================
@@ -372,16 +420,31 @@ pause_for_key_copy() {
 phase_ufw() {
     print_phase "4" "Firewall Configuration (UFW)"
     
+    # Get the original port that was backed up
+    ORIGINAL_PORT=$(cat "$BACKUP_DIR/original_ssh_port" 2>/dev/null || echo "22")
+    
     # Backup current UFW rules
     ufw status numbered > "$BACKUP_DIR/ufw.rules" 2>/dev/null || true
     
-    # Reset UFW to defaults
-    log_info "Configuring UFW defaults..."
-    ufw default deny incoming
-    ufw default allow outgoing
+    # Check if UFW is already active
+    UFW_WAS_ACTIVE=false
+    if ufw status | grep -q "Status: active"; then
+        UFW_WAS_ACTIVE=true
+        log_info "UFW was already active - will preserve existing rules"
+    fi
     
-    # Allow new SSH port
+    # Reset UFW to defaults (only if not already active with rules)
+    if [ "$UFW_WAS_ACTIVE" = false ]; then
+        log_info "Configuring UFW defaults..."
+        ufw default deny incoming
+        ufw default allow outgoing
+    fi
+    
+    # Allow BOTH ports temporarily (dual-port mode)
+    log_info "Allowing both ports $ORIGINAL_PORT and $NEW_SSH_PORT (dual-port mode)..."
+    ufw allow "$ORIGINAL_PORT/tcp" comment 'SSH original port (temporary)'
     ufw allow "$NEW_SSH_PORT/tcp" comment 'SSH hardened port'
+    log_success "Port $ORIGINAL_PORT/tcp allowed (temporary)"
     log_success "Port $NEW_SSH_PORT/tcp allowed"
     
     # Ask about additional ports
@@ -706,6 +769,183 @@ EOF
 }
 
 # =============================================================================
+# PHASE 8: FINALIZE HARDENING (Remove port 22)
+# =============================================================================
+
+phase_finalize_hardening() {
+    print_phase "8" "Finalize Hardening - Remove Port 22"
+    
+    # Get stored values
+    SSH_SERVICE=$(cat "$BACKUP_DIR/ssh_service_name" 2>/dev/null || echo "ssh")
+    ORIGINAL_PORT=$(cat "$BACKUP_DIR/original_ssh_port" 2>/dev/null || echo "22")
+    
+    log_info "SSH Service: $SSH_SERVICE"
+    log_info "Original port to remove: $ORIGINAL_PORT"
+    
+    echo -e "\n${YELLOW}========================================${NC}"
+    echo -e "${YELLOW}FINAL HARDENING STEP${NC}"
+    echo -e "${YELLOW}========================================${NC}\n"
+    
+    echo "This is the FINAL step that will:"
+    echo "  1. Remove port $ORIGINAL_PORT from SSH configuration"
+    echo "  2. Remove port $ORIGINAL_PORT from UFW rules"
+    echo "  3. Restart SSH with ONLY port $NEW_SSH_PORT"
+    echo ""
+    echo -e "${RED}WARNING: After this step, you MUST use port $NEW_SSH_PORT to connect!${NC}"
+    echo ""
+    echo "Prerequisites:"
+    echo "  ✓ You have tested connection on port $NEW_SSH_PORT"
+    echo "  ✓ You have the SSH private key saved"
+    echo "  ✓ You can connect using the new user '$NEW_USER'"
+    echo ""
+    
+    read -p "Have you tested the new port $NEW_SSH_PORT and confirmed it works? (yes/no): " -r
+    
+    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        log_warning "User chose not to finalize. Port $ORIGINAL_PORT remains active."
+        echo ""
+        echo -e "${YELLOW}Port $ORIGINAL_PORT was NOT removed.${NC}"
+        echo "You can manually remove it later by:"
+        echo "  1. Edit /etc/ssh/sshd_config and remove 'Port $ORIGINAL_PORT'"
+        echo "  2. Run: sudo ufw delete allow $ORIGINAL_PORT/tcp"
+        echo "  3. Run: sudo systemctl restart $SSH_SERVICE"
+        echo ""
+        return 0
+    fi
+    
+    log_success "User confirmed testing on port $NEW_SSH_PORT"
+    
+    # Step 1: Remove port from SSH config
+    log_info "Removing port $ORIGINAL_PORT from SSH configuration..."
+    
+    # Create new config with only the hardened port
+    cat > /etc/ssh/sshd_config << EOF
+# Server Hardening SSH Configuration
+# Generated: $(date)
+# FINAL CONFIG: Only port $NEW_SSH_PORT active
+
+# Port configuration
+Port $NEW_SSH_PORT
+
+# Authentication
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+
+# Security settings
+X11Forwarding no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePAM yes
+
+# Connection settings
+MaxAuthTries 3
+MaxSessions 2
+ClientAliveInterval 300
+ClientAliveCountMax 2
+LoginGraceTime 60
+
+# Logging
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# AllowUsers
+AllowUsers $NEW_USER
+
+# Protocol
+Protocol 2
+
+# HostKeys
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+# Subsystem
+Subsystem sftp /usr/lib/openssh/sftp-server
+EOF
+
+    log_success "SSH configuration updated (only port $NEW_SSH_PORT)"
+    
+    # Test SSH config syntax
+    if ! sshd -t; then
+        log_error "SSH configuration syntax error after removing port $ORIGINAL_PORT"
+        log_warning "Restoring dual-port configuration..."
+        rollback_ssh
+        return 1
+    fi
+    log_success "SSH configuration syntax validated"
+    
+    # Step 2: Remove port from UFW
+    log_info "Removing port $ORIGINAL_PORT from UFW..."
+    
+    # Get the rule number for the original port
+    RULE_NUM=$(ufw status numbered | grep "$ORIGINAL_PORT/tcp" | head -1 | awk -F'[][]' '{print $2}')
+    
+    if [ -n "$RULE_NUM" ]; then
+        echo "y" | ufw delete "$RULE_NUM" 2>/dev/null || true
+        log_success "Port $ORIGINAL_PORT removed from UFW"
+    else
+        log_warning "Could not find UFW rule for port $ORIGINAL_PORT"
+    fi
+    
+    # Step 3: Restart SSH service
+    log_info "Restarting SSH service with new configuration..."
+    if ! systemctl restart "$SSH_SERVICE"; then
+        log_error "Failed to restart $SSH_SERVICE"
+        log_warning "Port $ORIGINAL_PORT configuration may still be active"
+        return 1
+    fi
+    
+    sleep 2
+    
+    # Verify only new port is listening
+    if ss -tlnp | grep -q ":$NEW_SSH_PORT"; then
+        log_success "Port $NEW_SSH_PORT is listening"
+    else
+        log_error "Port $NEW_SSH_PORT is not listening!"
+        return 1
+    fi
+    
+    if ss -tlnp | grep -q ":$ORIGINAL_PORT"; then
+        log_warning "Port $ORIGINAL_PORT is still listening (may require manual cleanup)"
+    else
+        log_success "Port $ORIGINAL_PORT is no longer listening"
+    fi
+    
+    log_success "SSH hardened - now listening ONLY on port $NEW_SSH_PORT"
+    
+    # Update fail2ban to only monitor new port
+    log_info "Updating fail2ban configuration..."
+    cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime = 600
+findtime = 600
+maxretry = 3
+banaction = iptables-multiport
+
+[sshd]
+enabled = true
+port = $NEW_SSH_PORT
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 600
+EOF
+    
+    systemctl restart fail2ban
+    log_success "Fail2ban updated to monitor port $NEW_SSH_PORT only"
+    
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}HARDENING FINALIZED${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo -e "${YELLOW}IMPORTANT: From now on, connect using:${NC}"
+    echo -e "  ${BLUE}ssh -p $NEW_SSH_PORT $NEW_USER@<server-ip>${NC}"
+    echo ""
+}
+
+# =============================================================================
 # FINAL SUMMARY
 # =============================================================================
 
@@ -768,6 +1008,7 @@ main() {
     echo "  - Disable password authentication"
     echo "  - Disable root login via SSH"
     echo "  - Configure firewall and intrusion detection"
+    echo "  - Run in SAFE MODE (dual-port during transition)"
     echo ""
     echo -e "${RED}IMPORTANT: Ensure you have a stable connection to this server.${NC}"
     echo ""
@@ -788,6 +1029,7 @@ main() {
     phase_fail2ban
     phase_system_hardening
     phase_verification
+    phase_finalize_hardening
     
     # Final summary
     print_final_summary
