@@ -563,35 +563,47 @@ pause_for_key_copy() {
     
     # Debug: Check key and authorized_keys permissions
     log_info "Checking SSH key permissions..."
-    ls -la "$KEY_PATH"
+    ls -la "$KEY_PATH" 2>&1 | tee -a "$LOG_FILE"
     log_info "Checking authorized_keys for $NEW_USER..."
-    ls -la "/home/$NEW_USER/.ssh/"
-    head -1 "/home/$NEW_USER/.ssh/authorized_keys"
+    ls -la "/home/$NEW_USER/.ssh/" 2>&1 | tee -a "$LOG_FILE"
+    head -1 "/home/$NEW_USER/.ssh/authorized_keys" 2>&1 | tee -a "$LOG_FILE"
     
     # Ensure private key is readable by root (script runs as root)
     chmod 600 "$KEY_PATH"
     
     # Try a local test connection using the key we just created
     # This tests that SSH is actually accepting connections on the new port
-    LOCAL_TEST_RESULT=$(ssh -i "$KEY_PATH" \
+    log_info "Attempting SSH connection test (this may take a few seconds)..."
+    
+    # Use a temp file to capture output (more reliable than command substitution with set -e)
+    TEST_OUTPUT_FILE=$(mktemp)
+    SSH_TEST_SUCCESS=false
+    
+    # Run SSH test - use '|| true' to prevent set -e from aborting
+    timeout 10 ssh -i "$KEY_PATH" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=5 \
         -o PasswordAuthentication=no \
         -o PubkeyAuthentication=yes \
+        -o BatchMode=yes \
         -p "$NEW_SSH_PORT" \
         "$NEW_USER@localhost" \
-        "echo 'SSH_TEST_SUCCESS'" 2>&1)
+        "echo 'SSH_TEST_SUCCESS'" > "$TEST_OUTPUT_FILE" 2>&1 || true
     
-    if echo "$LOCAL_TEST_RESULT" | grep -q "SSH_TEST_SUCCESS"; then
+    # Check the result
+    if grep -q "SSH_TEST_SUCCESS" "$TEST_OUTPUT_FILE" 2>/dev/null; then
         echo -e "${GREEN}✓ Local SSH test PASSED on port $NEW_SSH_PORT${NC}"
         log_success "SSH is working correctly on port $NEW_SSH_PORT"
+        SSH_TEST_SUCCESS=true
     else
         echo ""
         echo -e "${RED}✗ Local SSH test FAILED on port $NEW_SSH_PORT${NC}"
-        echo -e "${RED}Error: $LOCAL_TEST_RESULT${NC}"
         echo ""
         log_error "Cannot connect via SSH on port $NEW_SSH_PORT!"
+        log_info "Error output:"
+        cat "$TEST_OUTPUT_FILE" | tee -a "$LOG_FILE"
+        echo ""
         log_info "This means you will be LOCKED OUT if we continue."
         echo ""
         echo -e "${YELLOW}Troubleshooting:${NC}"
@@ -610,6 +622,7 @@ pause_for_key_copy() {
         
         read -p "SSH test failed. Do you want to abort? (yes/no/continue): " -r
         if [[ ! $REPLY =~ ^[Cc][Oo][Nn][Tt][Ii][Nn][Uu][Ee]$ ]]; then
+            rm -f "$TEST_OUTPUT_FILE"
             log_error "Aborting due to SSH connectivity test failure"
             rollback_ssh
             rollback_user
@@ -618,6 +631,9 @@ pause_for_key_copy() {
         log_warning "User chose to continue despite SSH test failure"
         log_warning "You may be locked out - proceed at your own risk!"
     fi
+    
+    # Cleanup temp file
+    rm -f "$TEST_OUTPUT_FILE"
     
     log_success "User confirmed key copy and SSH is working"
 }
