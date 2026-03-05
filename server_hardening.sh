@@ -278,6 +278,9 @@ phase_ssh_hardening() {
 Port $CURRENT_PORT
 Port $NEW_SSH_PORT
 
+# Address family (use any for both IPv4 and IPv6)
+AddressFamily any
+
 # Authentication
 PermitRootLogin no
 PasswordAuthentication no
@@ -327,12 +330,29 @@ EOF
     
     # Restart SSH service with detected name
     log_info "Restarting SSH service ($SSH_SERVICE)..."
-    if ! systemctl restart "$SSH_SERVICE"; then
+    
+    # Check if port 2202 is already in use by something else
+    if ss -tlnp | grep -q ":$NEW_SSH_PORT "; then
+        log_warning "Port $NEW_SSH_PORT appears to be already in use!"
+        log_info "Current process using port $NEW_SSH_PORT:"
+        ss -tlnp | grep ":$NEW_SSH_PORT "
+    fi
+    
+    # Restart the service
+    if ! systemctl restart "$SSH_SERVICE" 2>&1 | tee -a "$LOG_FILE"; then
         log_error "Failed to restart $SSH_SERVICE service"
+        log_info "Checking for errors..."
+        systemctl status "$SSH_SERVICE" --no-pager -l | tail -20
         rollback_ssh
         exit 1
     fi
     sleep 2
+    
+    # Check for any SSH errors in logs
+    if journalctl -u "$SSH_SERVICE" --since "1 minute ago" -p err --no-pager 2>/dev/null | grep -q error; then
+        log_warning "Recent errors in SSH logs:"
+        journalctl -u "$SSH_SERVICE" --since "1 minute ago" -p err --no-pager | tail -10
+    fi
     
     # Verify SSH service is running
     if ! systemctl is-active --quiet "$SSH_SERVICE"; then
@@ -343,25 +363,67 @@ EOF
     
     log_success "SSH service restarted successfully"
     
-    # Verify both ports are listening
+    # Verify both ports are listening - CRITICAL CHECK
     log_info "Verifying ports are listening..."
     sleep 2
     
-    if ! ss -tlnp | grep -q ":$CURRENT_PORT"; then
-        log_warning "Port $CURRENT_PORT may not be listening"
+    # Check original port
+    if ! ss -tlnp | grep -q ":$CURRENT_PORT "; then
+        log_error "CRITICAL: Port $CURRENT_PORT is not listening!"
+        log_error "SSH may not be working properly. Aborting."
+        rollback_ssh
+        exit 1
     else
         log_success "Port $CURRENT_PORT is listening"
     fi
     
-    if ss -tlnp | grep -q ":$NEW_SSH_PORT"; then
-        log_success "Port $NEW_SSH_PORT is listening"
+    # Check new port - CRITICAL: Must be listening
+    if ! ss -tlnp | grep -q ":$NEW_SSH_PORT "; then
+        log_error "CRITICAL: Port $NEW_SSH_PORT is not listening!"
+        log_error "Dual-port configuration failed. This is a fatal error."
+        log_info "Attempting to diagnose..."
+        
+        # Check SSH config
+        log_info "Current SSH config port lines:"
+        grep "^Port" /etc/ssh/sshd_config 2>/dev/null || echo "No Port lines found"
+        
+        # Check if SSH is binding properly
+        log_info "SSH process listening on:"
+        ss -tlnp 2>/dev/null | grep -E "(ssh|sshd)" || echo "No SSH processes found"
+        
+        log_error "Cannot proceed without port $NEW_SSH_PORT working."
+        log_info "This usually means:"
+        log_info "  1. SSH service didn't restart properly"
+        log_info "  2. Port 2202 is blocked by firewall/rules"
+        log_info "  3. SSH doesn't support dual-port binding on this system"
+        log_info ""
+        log_info "Rolling back to previous configuration..."
+        rollback_ssh
+        exit 1
+    fi
+    
+    log_success "Port $NEW_SSH_PORT is listening"
+    
+    # Test actual SSH connectivity on new port locally
+    log_info "Testing SSH connectivity on port $NEW_SSH_PORT..."
+    sleep 1
+    
+    # Try to get SSH banner from new port
+    SSH_BANNER=$(timeout 5 bash -c "exec 3<>/dev/tcp/localhost/$NEW_SSH_PORT; echo 'SSH-2.0-test' >&3; cat <&3" 2>/dev/null | head -1)
+    if echo "$SSH_BANNER" | grep -q "SSH"; then
+        log_success "SSH is responding on port $NEW_SSH_PORT"
+        log_info "Banner: $SSH_BANNER"
     else
-        log_warning "Port $NEW_SSH_PORT may not be listening yet"
+        log_warning "Could not verify SSH response on port $NEW_SSH_PORT"
+        log_info "Port is listening but SSH handshake test may have failed"
+        log_info "This can happen with certain SSH configurations"
     fi
     
     # Store SSH service name for later use
     echo "$SSH_SERVICE" > "$BACKUP_DIR/ssh_service_name"
     echo "$CURRENT_PORT" > "$BACKUP_DIR/original_ssh_port"
+    
+    log_success "Phase 3 complete - both ports are active and verified"
 }
 
 # =============================================================================
@@ -388,7 +450,7 @@ pause_for_key_copy() {
     echo -e "Port: ${GREEN}$NEW_SSH_PORT${NC}"
     echo -e "Authentication: ${GREEN}SSH Key${NC}\n"
     
-    echo -e "${YELLOW}IMPORTANT:${NC}"
+    echo -e "${YELLOW}IMPORTANT STEPS:${NC}"
     echo -e "1. Copy the private key above (everything between the markers)"
     echo -e "2. Open Termius and create a new key"
     echo -e "3. Paste the private key and save"
@@ -410,7 +472,59 @@ pause_for_key_copy() {
         exit 1
     fi
     
-    log_success "User confirmed key copy"
+    # VERIFY CONNECTION: Test that SSH actually works on new port locally
+    log_info "Verifying SSH connectivity on port $NEW_SSH_PORT..."
+    echo ""
+    echo -e "${YELLOW}Testing local SSH connectivity on port $NEW_SSH_PORT...${NC}"
+    
+    # Try a local test connection using the key we just created
+    # This tests that SSH is actually accepting connections on the new port
+    LOCAL_TEST_RESULT=$(ssh -i "$KEY_PATH" \
+        -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=5 \
+        -o PasswordAuthentication=no \
+        -o PubkeyAuthentication=yes \
+        -p "$NEW_SSH_PORT" \
+        "$NEW_USER@localhost" \
+        "echo 'SSH_TEST_SUCCESS'" 2>&1)
+    
+    if echo "$LOCAL_TEST_RESULT" | grep -q "SSH_TEST_SUCCESS"; then
+        echo -e "${GREEN}✓ Local SSH test PASSED on port $NEW_SSH_PORT${NC}"
+        log_success "SSH is working correctly on port $NEW_SSH_PORT"
+    else
+        echo ""
+        echo -e "${RED}✗ Local SSH test FAILED on port $NEW_SSH_PORT${NC}"
+        echo -e "${RED}Error: $LOCAL_TEST_RESULT${NC}"
+        echo ""
+        log_error "Cannot connect via SSH on port $NEW_SSH_PORT!"
+        log_info "This means you will be LOCKED OUT if we continue."
+        echo ""
+        echo -e "${YELLOW}Troubleshooting:${NC}"
+        echo "  1. Check if port $NEW_SSH_PORT is actually listening:"
+        echo "     ss -tlnp | grep :$NEW_SSH_PORT"
+        echo ""
+        echo "  2. Check SSH service status:"
+        echo "     systemctl status ssh"
+        echo ""
+        echo "  3. Check SSH config for errors:"
+        echo "     sshd -t"
+        echo ""
+        echo "  4. Look at SSH logs:"
+        echo "     tail -20 /var/log/auth.log"
+        echo ""
+        
+        read -p "SSH test failed. Do you want to abort? (yes/no/continue): " -r
+        if [[ ! $REPLY =~ ^[Cc][Oo][Nn][Tt][Ii][Nn][Uu][Ee]$ ]]; then
+            log_error "Aborting due to SSH connectivity test failure"
+            rollback_ssh
+            rollback_user
+            exit 1
+        fi
+        log_warning "User chose to continue despite SSH test failure"
+        log_warning "You may be locked out - proceed at your own risk!"
+    fi
+    
+    log_success "User confirmed key copy and SSH is working"
 }
 
 # =============================================================================
