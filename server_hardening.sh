@@ -805,6 +805,9 @@ EOF
 phase_verification() {
     print_phase "7" "Verification & Documentation"
     
+    # Get the SSH service name for documentation
+    SSH_SERVICE=$(cat "$BACKUP_DIR/ssh_service_name" 2>/dev/null || echo "ssh")
+    
     # Create security report
     cat > "$REPORT_FILE" << EOF
 ===============================================================================
@@ -918,11 +921,11 @@ Option 1: Physical/Console Access
 2. Login as root or use recovery mode
 3. To restore SSH on port 22:
    cp $BACKUP_DIR/sshd_config /etc/ssh/sshd_config
-   systemctl restart sshd
+   systemctl restart $SSH_SERVICE
 
 4. To re-enable root login temporarily:
    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
-   systemctl restart sshd
+   systemctl restart $SSH_SERVICE
 
 5. To disable UFW:
    ufw disable
@@ -936,7 +939,7 @@ Option 3: Full Rollback
 -----------------------
 To completely undo all changes:
    cp $BACKUP_DIR/sshd_config /etc/ssh/sshd_config
-   systemctl restart sshd
+   systemctl restart $SSH_SERVICE
    ufw disable
    ufw --force reset
    userdel -r $NEW_USER
