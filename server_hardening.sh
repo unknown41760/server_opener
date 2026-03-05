@@ -90,7 +90,15 @@ rollback_ssh() {
     log_warning "Rolling back SSH configuration..."
     if [ -f "$BACKUP_DIR/sshd_config" ]; then
         cp "$BACKUP_DIR/sshd_config" /etc/ssh/sshd_config
-        systemctl restart sshd || systemctl restart ssh
+        # Try to detect which service to restart
+        if systemctl list-unit-files | grep -q "^ssh\.service"; then
+            systemctl restart ssh 2>/dev/null || true
+        elif systemctl list-unit-files | grep -q "^sshd\.service"; then
+            systemctl restart sshd 2>/dev/null || true
+        else
+            # Try both as fallback
+            systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        fi
         log_info "SSH configuration restored"
     fi
 }
@@ -329,7 +337,9 @@ EOF
     log_success "SSH configuration syntax validated"
     
     # Restart SSH service with detected name
+    # Use full stop/start cycle for port changes to take effect properly
     log_info "Restarting SSH service ($SSH_SERVICE)..."
+    log_info "Using full stop/start cycle for port binding..."
     
     # Check if port 2202 is already in use by something else
     if ss -tlnp | grep -q ":$NEW_SSH_PORT "; then
@@ -338,15 +348,36 @@ EOF
         ss -tlnp | grep ":$NEW_SSH_PORT "
     fi
     
-    # Restart the service
-    if ! systemctl restart "$SSH_SERVICE" 2>&1 | tee -a "$LOG_FILE"; then
-        log_error "Failed to restart $SSH_SERVICE service"
+    # Check for SELinux/AppArmor that might block new ports
+    if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" = "Enforcing" ]; then
+        log_info "SELinux is enforcing - may need to allow port $NEW_SSH_PORT"
+        log_info "Attempting to add SSH port to SELinux policy..."
+        semanage port -a -t ssh_port_t -p tcp "$NEW_SSH_PORT" 2>/dev/null || \
+            semanage port -m -t ssh_port_t -p tcp "$NEW_SSH_PORT" 2>/dev/null || \
+            log_warning "Could not modify SELinux port policy"
+    fi
+    
+    # Full stop/start cycle (more reliable than restart for port changes)
+    log_info "Stopping $SSH_SERVICE..."
+    if ! systemctl stop "$SSH_SERVICE" 2>&1 | tee -a "$LOG_FILE"; then
+        log_error "Failed to stop $SSH_SERVICE service"
+        systemctl status "$SSH_SERVICE" --no-pager -l | tail -20
+        rollback_ssh
+        exit 1
+    fi
+    
+    sleep 1
+    
+    log_info "Starting $SSH_SERVICE..."
+    if ! systemctl start "$SSH_SERVICE" 2>&1 | tee -a "$LOG_FILE"; then
+        log_error "Failed to start $SSH_SERVICE service"
         log_info "Checking for errors..."
         systemctl status "$SSH_SERVICE" --no-pager -l | tail -20
         rollback_ssh
         exit 1
     fi
-    sleep 2
+    
+    sleep 3
     
     # Check for any SSH errors in logs
     if journalctl -u "$SSH_SERVICE" --since "1 minute ago" -p err --no-pager 2>/dev/null | grep -q error; then
@@ -363,12 +394,46 @@ EOF
     
     log_success "SSH service restarted successfully"
     
-    # Verify both ports are listening - CRITICAL CHECK
-    log_info "Verifying ports are listening..."
-    sleep 2
+    # Verify both ports are listening - CRITICAL CHECK with retries
+    log_info "Verifying ports are listening (with retries)..."
+    
+    # Wait for SSH to fully bind to ports
+    sleep 3
+    
+    # Retry checking ports up to 5 times with 2 second delays
+    PORT_CHECK_ATTEMPTS=0
+    MAX_PORT_RETRIES=5
+    BOTH_PORTS_OK=false
+    
+    while [ $PORT_CHECK_ATTEMPTS -lt $MAX_PORT_RETRIES ]; do
+        ((PORT_CHECK_ATTEMPTS++))
+        log_info "Port check attempt $PORT_CHECK_ATTEMPTS/$MAX_PORT_RETRIES..."
+        
+        # Check if both ports are listening
+        PORT_22_LISTENING=false
+        PORT_2202_LISTENING=false
+        
+        if ss -tlnp 2>/dev/null | grep -q ":$CURRENT_PORT "; then
+            PORT_22_LISTENING=true
+        fi
+        
+        if ss -tlnp 2>/dev/null | grep -q ":$NEW_SSH_PORT "; then
+            PORT_2202_LISTENING=true
+        fi
+        
+        if [ "$PORT_22_LISTENING" = true ] && [ "$PORT_2202_LISTENING" = true ]; then
+            BOTH_PORTS_OK=true
+            break
+        fi
+        
+        if [ $PORT_CHECK_ATTEMPTS -lt $MAX_PORT_RETRIES ]; then
+            log_info "Ports not ready yet, waiting 2 seconds..."
+            sleep 2
+        fi
+    done
     
     # Check original port
-    if ! ss -tlnp | grep -q ":$CURRENT_PORT "; then
+    if [ "$PORT_22_LISTENING" = false ]; then
         log_error "CRITICAL: Port $CURRENT_PORT is not listening!"
         log_error "SSH may not be working properly. Aborting."
         rollback_ssh
@@ -378,7 +443,7 @@ EOF
     fi
     
     # Check new port - CRITICAL: Must be listening
-    if ! ss -tlnp | grep -q ":$NEW_SSH_PORT "; then
+    if [ "$PORT_2202_LISTENING" = false ]; then
         log_error "CRITICAL: Port $NEW_SSH_PORT is not listening!"
         log_error "Dual-port configuration failed. This is a fatal error."
         log_info "Attempting to diagnose..."
@@ -391,11 +456,21 @@ EOF
         log_info "SSH process listening on:"
         ss -tlnp 2>/dev/null | grep -E "(ssh|sshd)" || echo "No SSH processes found"
         
+        # Check SSH logs for binding errors
+        log_info "Recent SSH service logs:"
+        journalctl -u "$SSH_SERVICE" --since "2 minutes ago" --no-pager 2>/dev/null | tail -20
+        
         log_error "Cannot proceed without port $NEW_SSH_PORT working."
         log_info "This usually means:"
-        log_info "  1. SSH service didn't restart properly"
-        log_info "  2. Port 2202 is blocked by firewall/rules"
-        log_info "  3. SSH doesn't support dual-port binding on this system"
+        log_info "  1. SSH service didn't start properly (check logs above)"
+        log_info "  2. Port 2202 is blocked by firewall/selinux/apparmor"
+        log_info "  3. Another process is using port 2202"
+        log_info "  4. SSH config has syntax issues we didn't catch"
+        log_info ""
+        log_info "To debug manually:"
+        log_info "  1. Check: systemctl status $SSH_SERVICE"
+        log_info "  2. Check: ss -tlnp | grep -E '(22|2202)'"
+        log_info "  3. Check: cat /etc/ssh/sshd_config | grep -E '^Port'"
         log_info ""
         log_info "Rolling back to previous configuration..."
         rollback_ssh
