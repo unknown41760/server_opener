@@ -561,10 +561,21 @@ pause_for_key_copy() {
     echo ""
     echo -e "${YELLOW}Testing local SSH connectivity on port $NEW_SSH_PORT...${NC}"
     
+    # Debug: Check key and authorized_keys permissions
+    log_info "Checking SSH key permissions..."
+    ls -la "$KEY_PATH"
+    log_info "Checking authorized_keys for $NEW_USER..."
+    ls -la "/home/$NEW_USER/.ssh/"
+    head -1 "/home/$NEW_USER/.ssh/authorized_keys"
+    
+    # Ensure private key is readable by root (script runs as root)
+    chmod 600 "$KEY_PATH"
+    
     # Try a local test connection using the key we just created
     # This tests that SSH is actually accepting connections on the new port
     LOCAL_TEST_RESULT=$(ssh -i "$KEY_PATH" \
         -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=5 \
         -o PasswordAuthentication=no \
         -o PubkeyAuthentication=yes \
