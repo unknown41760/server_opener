@@ -37,14 +37,14 @@ log_test() {
 
 pass() {
     echo -e "${GREEN}[PASS]${NC} $1" | tee -a "$REPORT_FILE"
-    ((PASSED_TESTS++))
-    ((TOTAL_TESTS++))
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
 }
 
 fail() {
     echo -e "${RED}[FAIL]${NC} $1" | tee -a "$REPORT_FILE"
-    ((FAILED_TESTS++))
-    ((TOTAL_TESTS++))
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
 }
 
 warn() {
