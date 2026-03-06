@@ -527,12 +527,16 @@ pause_for_key_copy() {
     cat "$KEY_PATH"
     echo -e "\n${BLUE}--- END PRIVATE KEY ---${NC}\n"
     
+    # Read password from saved credentials
+    SAVED_PASSWORD=$(grep "Password:" "$BACKUP_DIR/credentials.txt" 2>/dev/null | cut -d' ' -f2- || echo "[check $BACKUP_DIR/credentials.txt]")
+    
     echo -e "${YELLOW}========================================${NC}"
     echo -e "${YELLOW}CONNECTION DETAILS${NC}"
     echo -e "${YELLOW}========================================${NC}"
     echo -e "Username: ${GREEN}$NEW_USER${NC}"
     echo -e "Port: ${GREEN}$NEW_SSH_PORT${NC}"
-    echo -e "Authentication: ${GREEN}SSH Key${NC}\n"
+    echo -e "Authentication: ${GREEN}SSH Key${NC}"
+    echo -e "Password: ${GREEN}$SAVED_PASSWORD${NC} (for emergency console access)\n"
     
     echo -e "${YELLOW}IMPORTANT STEPS:${NC}"
     echo -e "1. Copy the private key above (everything between the markers)"
