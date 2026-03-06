@@ -12,9 +12,8 @@ set -euo pipefail
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-SCRIPT_VERSION="1.0"
+SCRIPT_VERSION="1.1"
 NEW_USER="sysadmin"
-NEW_SSH_PORT="2202"
 REPORT_FILE="/root/hardening-test-report-$(date +%Y%m%d_%H%M%S).txt"
 TOTAL_TESTS=0
 PASSED_TESTS=0
@@ -26,6 +25,36 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
+
+# =============================================================================
+# DETECT SSH PORT
+# =============================================================================
+
+detect_ssh_port() {
+    # Try to get port from sshd_config first
+    local config_port
+    config_port=$(grep "^Port" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+    
+    if [ -n "$config_port" ]; then
+        echo "$config_port"
+        return 0
+    fi
+    
+    # Fallback: check what port sshd is actually listening on
+    local listening_port
+    listening_port=$(ss -tlnp 2>/dev/null | grep "sshd" | grep -v ":22 " | head -1 | awk '{print $4}' | cut -d: -f2)
+    
+    if [ -n "$listening_port" ]; then
+        echo "$listening_port"
+        return 0
+    fi
+    
+    # Final fallback: assume 2202 (the default)
+    echo "2202"
+}
+
+# Detect the SSH port dynamically
+NEW_SSH_PORT=$(detect_ssh_port)
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -586,9 +615,17 @@ main() {
     echo -e "${YELLOW}SERVER HARDENING TEST SUITE v$SCRIPT_VERSION${NC}"
     echo -e "${YELLOW}========================================${NC}\n"
     
+    # Show detected configuration
+    echo -e "${BLUE}Detected Configuration:${NC}"
+    echo -e "  User: ${GREEN}$NEW_USER${NC}"
+    echo -e "  SSH Port: ${GREEN}$NEW_SSH_PORT${NC}"
+    echo ""
+    
     # Initialize report
     echo "Server Hardening Test Report" > "$REPORT_FILE"
     echo "Generated: $(date)" >> "$REPORT_FILE"
+    echo "========================================" >> "$REPORT_FILE"
+    echo "Detected SSH Port: $NEW_SSH_PORT" >> "$REPORT_FILE"
     echo "========================================" >> "$REPORT_FILE"
     
     # Check if running as root
