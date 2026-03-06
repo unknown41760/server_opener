@@ -10,13 +10,17 @@ Production-ready server hardening script implementing industry best practices wi
 **Features:**
 - Creates secure admin user (`sysadmin`)
 - Generates Ed25519 SSH key pair
+- **Displays password** alongside SSH key for emergency access
 - Changes SSH port to 2202
+- **Dual-port safe mode** - keeps port 22 open during hardening
+- **Auto-detects Ubuntu 24.04 socket activation** and handles it correctly
 - Disables root login & password authentication
 - Configures UFW firewall
 - Sets up Fail2ban intrusion prevention
 - Enables automatic security updates
 - Full rollback capability
 - Interactive pause to copy SSH key to Termius
+- 8-phase execution with verification at each step
 
 **Usage:**
 ```bash
@@ -167,6 +171,47 @@ systemctl restart sshd
 ufw disable
 ```
 
+## Common Issues & Solutions
+
+### Issue: Script stops after "Testing local SSH connectivity"
+**Cause:** Ubuntu 24.04 uses systemd socket activation (ssh.socket) which prevents SSH from binding to new ports.
+
+**Solution:** Fixed in latest version - script now automatically stops ssh.socket before configuring ports.
+
+### Issue: "Permission denied (publickey)" when connecting
+**Cause:** SSH key not properly saved or permissions wrong.
+
+**Solution:**
+```bash
+# Ensure key has correct permissions
+chmod 600 ~/.ssh/your_key
+
+# Use correct username (sysadmin, not your old user)
+ssh -p 2202 -i ~/.ssh/your_key sysadmin@server-ip
+```
+
+### Issue: "Password change required" loop
+**Cause:** User account requires password change on first login, blocking SSH key auth.
+
+**Solution:** Fixed in latest version - script no longer forces password change. If encountered:
+```bash
+# From console/another session:
+sudo chage -d -1 sysadmin
+```
+
+### Issue: SCP connection times out
+**Cause:** Trying to connect on old port 22 after hardening.
+
+**Solution:** Use port 2202 with `-P` (capital P):
+```bash
+scp -P 2202 -i ~/.ssh/key file.txt sysadmin@server:/tmp/
+```
+
+### Issue: Test suite fails on UFW outgoing policy
+**Cause:** Different UFW versions display status differently.
+
+**Solution:** Fixed in latest test suite - now checks multiple output formats.
+
 ## Safety Checklist
 
 Before running on production:
@@ -177,6 +222,7 @@ Before running on production:
 - [ ] Backup important data
 - [ ] Review `SERVER_HARDENING_PLAN.md`
 - [ ] Read recovery instructions
+- [ ] Save SSH key and password when displayed
 
 ## Compatibility
 

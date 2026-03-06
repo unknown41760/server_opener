@@ -278,6 +278,77 @@ sudo tail -50 /var/log/auth.log
 
 **Note**: Phase 8 requires manual confirmation and testing. You can skip it and return later to finalize.
 
+## Complete Test Procedure
+
+### Step-by-Step Testing Guide
+
+#### 1. Initial Setup
+```bash
+# Copy scripts to server
+scp server_hardening.sh test_hardening.sh user@server:/tmp/
+
+# SSH to server
+ssh user@server
+cd /tmp
+chmod +x *.sh
+```
+
+#### 2. Run Hardening Script
+```bash
+sudo ./server_hardening.sh
+```
+
+**What happens:**
+1. **Phase 1-2**: System checks, creates `sysadmin` user with SSH key
+2. **Phase 3**: Configures dual-port SSH (22 + 2202), stops ssh.socket, verifies both ports work
+3. **Key Display**: Shows private key, password, and connection details
+4. **Copy Key**: Save the SSH key to your local machine (Termius, OpenSSH, etc.)
+5. **Test Connection**: Verify you can connect on port 2202
+6. **Phase 4-7**: UFW, fail2ban, system updates, documentation
+7. **Phase 8**: Final confirmation to remove port 22
+
+**Important:** The script displays:
+```
+Username: sysadmin
+Port: 2202
+Authentication: SSH Key
+Password: [random_password] (for emergency console access)
+```
+
+#### 3. Connect via New SSH Key
+
+**Save the key locally:**
+```bash
+# On your local machine
+mkdir -p ~/.ssh
+cat > ~/.ssh/server_key << 'EOF'
+-----BEGIN OPENSSH PRIVATE KEY-----
+[paste key from script output]
+-----END OPENSSH PRIVATE KEY-----
+EOF
+chmod 600 ~/.ssh/server_key
+```
+
+**Connect:**
+```bash
+ssh -p 2202 -i ~/.ssh/server_key sysadmin@server-ip
+```
+
+#### 4. Run Test Suite
+```bash
+# Copy test script (use new port and key!)
+scp -P 2202 -i ~/.ssh/server_key test_hardening.sh sysadmin@server-ip:/tmp/
+
+# SSH in and run tests
+ssh -p 2202 -i ~/.ssh/server_key sysadmin@server-ip
+sudo /tmp/test_hardening.sh
+```
+
+**Expected Results:**
+- Total Tests: 40
+- Pass Rate: 95-100% (38-40/40 tests)
+- Security Score: 75-100/100
+
 ## After Testing
 
 ### Before Finalizing (Phase 8):
