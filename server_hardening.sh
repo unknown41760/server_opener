@@ -12,9 +12,10 @@ set -euo pipefail
 # =============================================================================
 # CONFIGURATION VARIABLES
 # =============================================================================
-SCRIPT_VERSION="1.0"
+SCRIPT_VERSION="1.1"
 NEW_USER="sysadmin"
-NEW_SSH_PORT="2202"
+DEFAULT_SSH_PORT="2202"
+NEW_SSH_PORT=""
 BACKUP_DIR="/root/.hardening-backup-$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="/var/log/server-hardening-$(date +%Y%m%d_%H%M%S).log"
 REPORT_FILE="/root/security-hardening-report-$(date +%Y%m%d_%H%M%S).txt"
@@ -73,6 +74,59 @@ print_phase() {
 
 # Error handler
 trap 'log_error "Script failed at line $LINENO with exit code $?"' ERR
+
+# =============================================================================
+# CONFIGURATION PROMPTS
+# =============================================================================
+
+prompt_for_ssh_port() {
+    print_header "SSH Port Configuration"
+    
+    echo -e "${BLUE}Please specify the new SSH port.${NC}"
+    echo -e "${YELLOW}Default: $DEFAULT_SSH_PORT${NC}"
+    echo ""
+    echo -e "${RED}Requirements:${NC}"
+    echo "  - Port must be between 1024 and 65535"
+    echo "  - Port must not be in use by another service"
+    echo "  - Avoid common ports: 80, 443, 8080, etc."
+    echo ""
+    
+    while true; do
+        read -p "Enter SSH port [$DEFAULT_SSH_PORT]: " -r PORT_INPUT
+        
+        # Use default if empty
+        if [ -z "$PORT_INPUT" ]; then
+            NEW_SSH_PORT="$DEFAULT_SSH_PORT"
+            log_info "Using default port: $NEW_SSH_PORT"
+            break
+        fi
+        
+        # Validate port number
+        if [[ ! "$PORT_INPUT" =~ ^[0-9]+$ ]]; then
+            log_error "Port must be a number"
+            continue
+        fi
+        
+        if [ "$PORT_INPUT" -lt 1024 ] || [ "$PORT_INPUT" -gt 65535 ]; then
+            log_error "Port must be between 1024 and 65535"
+            continue
+        fi
+        
+        # Check if port is already in use
+        if ss -tlnp | grep -q ":$PORT_INPUT "; then
+            log_error "Port $PORT_INPUT is already in use"
+            log_info "Current process using this port:"
+            ss -tlnp | grep ":$PORT_INPUT "
+            continue
+        fi
+        
+        NEW_SSH_PORT="$PORT_INPUT"
+        log_success "SSH port set to: $NEW_SSH_PORT"
+        break
+    done
+    
+    echo ""
+}
 
 # =============================================================================
 # ROLLBACK FUNCTIONS
@@ -1236,7 +1290,7 @@ main() {
     
     echo -e "\n${YELLOW}WARNING: This script will:${NC}"
     echo "  - Create a new user '$NEW_USER'"
-    echo "  - Change SSH port to $NEW_SSH_PORT"
+    echo "  - Change SSH port to a custom port (default: $DEFAULT_SSH_PORT)"
     echo "  - Disable password authentication"
     echo "  - Disable root login via SSH"
     echo "  - Configure firewall and intrusion detection"
@@ -1251,6 +1305,9 @@ main() {
         echo "Aborted."
         exit 0
     fi
+    
+    # Prompt for SSH port
+    prompt_for_ssh_port
     
     # Execute phases
     phase_preflight

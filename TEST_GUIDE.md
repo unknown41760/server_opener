@@ -15,6 +15,7 @@ This script uses **Dual-Port Safe Mode** to prevent SSH lockout:
 
 ### Key Improvements
 
+✅ **Configurable SSH port** - Specify any port (1024-65535), default is 2202  
 ✅ **Auto-detects SSH service** - Works with `ssh` (Ubuntu) or `sshd` (other distros)  
 ✅ **Preserves UFW rules** - Won't overwrite existing firewall configuration  
 ✅ **Dual-port mode** - Port 22 stays open until you explicitly confirm removal  
@@ -56,8 +57,9 @@ sudo ./test_hardening.sh
 ### Option 2: Cloud VM (DigitalOcean/AWS/GCP)
 - Ubuntu 24.04 LTS image
 - Minimum 1GB RAM
-- **During hardening**: Both ports 22 and 2202 are open
-- **After finalization**: Only port 2202 (port 22 is removed)
+- **During hardening**: Both original port (22) and new port (default: 2202) are open
+- **After finalization**: Only your chosen port (port 22 is removed)
+- **Note:** You can specify any port between 1024-65535 during setup
 
 ### Option 3: Docker (Limited Testing)
 ```bash
@@ -72,8 +74,9 @@ docker run -it --privileged ubuntu:24.04 bash
 - [ ] Stable internet connection
 - [ ] At least 1GB free disk space
 - [ ] SSH client ready to test connection
+- [ ] **Note:** You can configure any SSH port (1024-65535), default is 2202
 - [ ] Understanding: Script runs in **dual-port safe mode** (port 22 stays open during hardening)
-- [ ] Plan: Test port 2202 **before** finalizing (Phase 8)
+- [ ] Plan: Test your chosen port **before** finalizing (Phase 8)
 
 ## What the Tests Check
 
@@ -225,24 +228,27 @@ After running tests, check:
 
 ## Manual Verification Commands
 
+**Note:** Replace `2202` with your actual chosen port number.
+
 ### During Hardening (Before Phase 8 Finalization)
 ```bash
 # Test NEW port (2202) - Do this before finalizing!
+# Replace 2202 with your chosen port
 ssh -i ~/.ssh/server_hardening_key_* -p 2202 sysadmin@<server-ip>
 
 # Verify old port (22) still works (during dual-port mode)
 ssh -p 22 <your-current-user>@<server-ip>
 
-# Check both ports are listening
+# Check both ports are listening (replace 2202 with your port)
 sudo ss -tlnp | grep -E ':(22|2202)'
 
-# Check UFW allows both ports
+# Check UFW allows both ports (replace 2202 with your port)
 sudo ufw status | grep -E '(22|2202)/tcp'
 ```
 
 ### After Finalization (Phase 8 Complete)
 ```bash
-# Test SSH on new port ONLY
+# Test SSH on new port ONLY (replace 2202 with your chosen port)
 ssh -i ~/.ssh/server_hardening_key_* -p 2202 sysadmin@<server-ip>
 
 # Verify port 22 is closed
@@ -251,13 +257,13 @@ ssh -p 22 <user>@<server-ip>  # Should fail
 # Check sudo access
 sudo whoami
 
-# Verify root disabled
+# Verify root disabled (replace 2202 with your port)
 ssh -p 2202 root@<server-ip>  # Should fail
 
-# Check UFW (only 2202 should be listed)
+# Check UFW (only your port should be listed)
 sudo ufw status verbose
 
-# Check fail2ban (monitors port 2202)
+# Check fail2ban (monitors your chosen port)
 sudo fail2ban-client status sshd
 
 # Check running services (auto-detects service name)

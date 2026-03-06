@@ -10,8 +10,8 @@ Production-ready server hardening script implementing industry best practices wi
 **Features:**
 - Creates secure admin user (`sysadmin`)
 - Generates Ed25519 SSH key pair
+- **Configurable SSH port** - user can specify any port (default: 2202)
 - **Displays password** alongside SSH key for emergency access
-- Changes SSH port to 2202
 - **Dual-port safe mode** - keeps port 22 open during hardening
 - **Auto-detects Ubuntu 24.04 socket activation** and handles it correctly
 - Disables root login & password authentication
